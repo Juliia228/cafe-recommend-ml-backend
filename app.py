@@ -8,8 +8,6 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from gensim.models import Word2Vec
 
-# python -m uvicorn app:app --host 0.0.0.0 --port 8000
-
 app = FastAPI()
 
 # глобальные переменные
@@ -36,12 +34,10 @@ class RecommendRequest(BaseModel):
 async def fit_model(data: FitCollaborativeFilteringRequest):
     """Обучение модели ALS на матрице взаимодействий пользователь-блюдо"""
     global ALSModel, user_item_matrix
-
     print("POST /fit-collaborative-filtering-model")
 
     # получаем разреженную матрицу
     user_item_matrix = sp.csr_matrix(data.userItemMatrix)
-
     # обучаем модель
     ALSModel = AlternatingLeastSquares(factors=20, iterations=40)
     ALSModel.fit(user_item_matrix)
@@ -53,12 +49,10 @@ async def fit_model(data: FitCollaborativeFilteringRequest):
 async def fit_model(data: FitContentBasedRequest):
     """Обучение модели Word2Vec на блюдах в виде списка ингредиентов"""
     global Word2VecModel, dish_vectors
-
     print("POST /fit-content-based-model")
 
     # обучаем модель
     Word2VecModel = Word2Vec(sentences=data.dishesIngredients, vector_size=100, window=5, min_count=1, workers=4)
-
     # превращаем блюда в вектора
     dish_vectors = [get_dish_vector(dish) for dish in data.dishesIngredients]
 
@@ -72,14 +66,19 @@ async def recommend(data: RecommendRequest):
 
     print("POST /recommend")
 
-    if ALSModel is None or user_item_matrix is None:
-        return {"error": "Model is not trained yet. Train the model first using POST /fit-collaborative-filtering-model"}
+    if ALSModel is None or user_item_matrix is None or Word2VecModel is None:
+        return {"error": "Models is not trained yet. "
+                         "Train the models first using POST /fit-collaborative-filtering-model "
+                         "and POST /fit-content-based-model"}
 
     user_id = data.userId
-    recommendationsFromCollaborative = collaborativeFiltering(user_id)
-    recommendationsFromContentBased = contentBased(user_id)
+    recommendations_from_collaborative = collaborativeFiltering(user_id)
+    recommendations_from_content_based = contentBased(user_id)
 
-    recommendations = recommendationsFromCollaborative объединить с recommendationsFromContentBased
+    recommendations = merge_recommendations(
+        recommendations_from_collaborative,
+        recommendations_from_content_based
+    )
     return {"recommendations": recommendations}
 
 
@@ -102,28 +101,27 @@ def collaborativeFiltering(user_id):
 
 def contentBased(user_id):
     global user_item_matrix, dish_vectors
-
     if user_item_matrix is None or dish_vectors is None:
         return {"error": "Content-based model is not trained yet. Train the model first using POST /fit-content-based-model"}
 
-    # Получаем список блюд, которые пользователь уже выбрал
     user_interactions = user_item_matrix[user_id].toarray().flatten()
     liked_dishes = np.where(user_interactions > 0)[0]
 
     if len(liked_dishes) == 0:
         return []
 
-    # Рассчитываем сходство каждого блюда с понравившимися пользователю
+    # векторы блюд, которые понравились пользователю
     user_dish_vectors = [dish_vectors[dish_id] for dish_id in liked_dishes]
+
+    # матрица сходства, где каждая строка - понравившееся блюдо, а столбцы — всем блюда
     similarities = cosine_similarity(user_dish_vectors, dish_vectors)
 
-    # Среднее сходство по всем понравившимся блюдам
+    # массив, где каждый индекс соответствует ID блюда, а значение — его усредненное сходство
     mean_similarity = np.mean(similarities, axis=0)
+    sorted_values = mean_similarity.argsort()[::-1]
 
-    # Получаем топ-N блюд
-    top_indices = mean_similarity.argsort()[::-1][:10]  # 10 лучших рекомендаций
-    recommendations = [{"item_id": int(index), "score": float(mean_similarity[index])} for index in top_indices]
-
+    recommendations = [{"item_id": int(index), "score": float(mean_similarity[index])}
+                       for index in sorted_values]
     return {"recommendations": recommendations}
 
 
@@ -138,3 +136,26 @@ def get_dish_vector(dish):
 
     # Возвращаем средний вектор блюда
     return np.mean(valid_ingredients, axis=0) if valid_ingredients else np.zeros(Word2VecModel.vector_size)
+
+
+def merge_recommendations(collaborative, content_based, weight_collaborative=0.5, weight_content_based=0.5):
+    """Объединение двух списков рекомендаций с учетом весов"""
+    combined_scores = {}
+
+    for rec in collaborative:
+        item_id = rec["item_id"]
+        score = rec["score"] * weight_collaborative
+        combined_scores[item_id] = combined_scores.get(item_id, 0) + score
+
+    for rec in content_based:
+        item_id = rec["item_id"]
+        score = rec["score"] * weight_content_based
+        combined_scores[item_id] = combined_scores.get(item_id, 0) + score
+
+    sorted_recommendations = sorted(
+        [{"item_id": item_id, "score": score} for item_id, score in combined_scores.items()],
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    return sorted_recommendations
