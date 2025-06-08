@@ -36,8 +36,12 @@ async def fit_model(data: FitCollaborativeFilteringRequest):
     global ALSModel, user_item_matrix
     print("POST /fit-collaborative-filtering-model")
 
+    matrix = data.userItemMatrix
+    if len(matrix) == 0:
+        return {"message": "ERROR: userItemMatrix is empty"}
+
     # получаем разреженную матрицу
-    user_item_matrix = sp.csr_matrix(data.userItemMatrix)
+    user_item_matrix = sp.csr_matrix(matrix)
     # обучаем модель
     ALSModel = AlternatingLeastSquares(factors=20, iterations=40)
     ALSModel.fit(user_item_matrix)
@@ -51,10 +55,14 @@ async def fit_model(data: FitContentBasedRequest):
     global Word2VecModel, dish_vectors
     print("POST /fit-content-based-model")
 
+    dishes = data.dishesIngredients
+    if len(dishes) == 0:
+        return {"message": "ERROR: dishesIngredients is empty"}
+
     # обучаем модель
-    Word2VecModel = Word2Vec(sentences=data.dishesIngredients, vector_size=100, window=5, min_count=1, workers=4)
+    Word2VecModel = Word2Vec(sentences=dishes, vector_size=100, window=5, min_count=1, epochs=10, workers=4)
     # превращаем блюда в вектора
-    dish_vectors = [get_dish_vector(dish) for dish in data.dishesIngredients]
+    dish_vectors = [get_dish_vector(dish) for dish in dishes]
 
     return {"message": "Word2Vec model trained successfully"}
 
@@ -96,7 +104,7 @@ def collaborativeFiltering(user_id):
     recommendations = [{"item_id": int(item_id), "score": float(score)}
                        for item_id, score in zip(item_ids, scores)]
 
-    return {"recommendations": recommendations}
+    return recommendations
 
 
 def contentBased(user_id):
@@ -113,7 +121,7 @@ def contentBased(user_id):
     # векторы блюд, которые понравились пользователю
     user_dish_vectors = [dish_vectors[dish_id] for dish_id in liked_dishes]
 
-    # матрица сходства, где каждая строка - понравившееся блюдо, а столбцы — всем блюда
+    # матрица сходства, где каждая строка - понравившееся блюдо, а столбцы — все блюда
     similarities = cosine_similarity(user_dish_vectors, dish_vectors)
 
     # массив, где каждый индекс соответствует ID блюда, а значение — его усредненное сходство
@@ -122,13 +130,13 @@ def contentBased(user_id):
 
     recommendations = [{"item_id": int(index), "score": float(mean_similarity[index])}
                        for index in sorted_values]
-    return {"recommendations": recommendations}
+    return recommendations
 
 
 def get_dish_vector(dish):
     global Word2VecModel
 
-    if ALSModel is None or user_item_matrix is None:
+    if Word2VecModel is None:
         return {"error": "Word2Vec model is not trained yet. Train the model first using POST /fit-content-based-model"}
 
     # Фильтруем ингредиенты, которые есть в словаре модели
